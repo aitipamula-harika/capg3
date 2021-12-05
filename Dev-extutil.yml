@@ -1,0 +1,256 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: The CloudFormation template for the CodePipeline.
+
+Parameters:
+    
+  SourceBucket:
+    Description: 'S3 source bucket'
+    Type: String
+    Default: 'tvprecap-uat-sourcecode-usw2'
+  SourceObjectKey:
+    Description: 'S3 source artifact'
+    Type: String
+    Default: 'tvpRecapDevExtUtilSourceCode.zip'
+  GitHubToken: 
+    NoEcho: true
+    Type: String
+    Description: Generate personal access token
+    Default: '36229bad4f19a6deccbee010c6ec454c253e643f'
+  CodePipelineArn:
+    Description: 'Role for codePipeline'
+    Type: String
+    Default: 'arn:aws:iam::153279871056:role/TVPRecapCodepipelineRole'    
+  CodeBuildArn:
+    Description: 'Role for codeBuild in codePipeline'
+    Type: String
+    Default: 'arn:aws:iam::153279871056:role/TVPRecapCodeBuildRole'
+  LambdaArn:
+    Description: 'Role for Lambda in codePipeline'
+    Type: String
+    Default: 'arn:aws:iam::153279871056:role/TVPRecapCodePipelineLambdaRole'
+  EventsRoleArn:
+    Description: 'Role for cloudwatch Events Rule for CodePipeline'
+    Type: String
+    Default: 'arn:aws:iam::153279871056:role/TVPRecap-CodePipeline-CloudwatchRole'
+  EnvType: # Mandetory Parameter
+    Description: Environment type.
+    Type: String
+    Default: qa
+    ConstraintDescription: Must specify `qa` , `dev` or `prod`.
+  ProjectID:
+    Type: String
+    Default: ProjectID  
+  ProjectOwner:
+    Type: String
+    Default: Daniel Herrero 
+  CreatedBy:
+    Type: String
+    Default: Harika
+  BusinessUnit:
+    Type: String
+    Default: TV Entertainment 
+  Project:
+    Type: String
+    Default: TVP Recap .Net Re-platform 
+    
+    
+Resources:
+
+  GheCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        Type: LINUX_CONTAINER
+      Name: TVPRecap-Dev-Ghe-ExtUtil-PipelineCodeBuildProject-usw2 #change the name 
+      ServiceRole: !Ref CodeBuildArn
+      Source:
+        Type: GITHUB_ENTERPRISE
+        Auth:
+          Resource: !Ref GitHubToken
+          Type: OAUTH
+        Location: https://github.inbcu.com/tvfinance/tvprecap-backend-tdfpe
+        BuildSpec: |  #change
+            version: 0.2
+            phases:
+                build:
+                    commands:
+                    - zip -r tvpRecapDevExtUtilSourceCode.zip .   
+                    - aws s3 cp tvpRecapDevExtUtilSourceCode.zip s3://tvprecap-uat-sourcecode-usw2
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvType
+        - Key: ProjectID
+          Value: !Ref ProjectID
+        - Key: Owner
+          Value: !Ref ProjectOwner
+        - Key: CreatedBy
+          Value: !Ref CreatedBy
+        - Key: BusinessUnit
+          Value: !Ref BusinessUnit
+        - Key: Project
+          Value: !Ref Project                     
+                    
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        Type: LINUX_CONTAINER
+      Name: TVPRecap-Dev-ExtUtil-PipelineCodeBuildProject-usw2
+      ServiceRole: !Ref CodeBuildArn
+      Source:
+        Type: GITHUB_ENTERPRISE
+        Auth:
+          Resource: !Ref GitHubToken
+          Type: OAUTH
+        Location: https://github.inbcu.com/tvfinance/tvprecap-backend-tdfpe
+        BuildSpec: |         #change
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                dotnet: 3.1
+              commands:
+              - echo Entered the install phase....
+              - pip install --upgrade aws-sam-cli
+            pre_build:
+              commands:
+              - echo Restore started on `date`
+              - dotnet restore TVPDW.ExtUtliltyAPI/TVPDW.ExtUtliltyAPI.csproj
+            build:
+              commands:
+              - echo Build started on `date` 
+              - dotnet publish -c release -o ./build_output TVPDW.ExtUtliltyAPI/TVPDW.ExtUtliltyAPI.csproj
+              - sam package --template-file Dev-RECAP-ExtUtilLambda.yml --output-template-file output-template.yml --s3-bucket tvpdw-dev-backend-usw2 --s3-prefix recap/extutilcode
+          artifacts:
+            files:
+              - '**/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvType
+        - Key: ProjectID
+          Value: !Ref ProjectID
+        - Key: Owner
+          Value: !Ref ProjectOwner
+        - Key: CreatedBy
+          Value: !Ref CreatedBy
+        - Key: BusinessUnit
+          Value: !Ref BusinessUnit
+        - Key: Project
+          Value: !Ref Project            
+
+  # Create CodePipeline with 3 stages (Source and Build)
+  CodePipeLine:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !Ref CodePipelineArn
+      Name: TVPRecap-Dev-ExtUtil-CodePipeline-usw2
+      Stages:
+      - Name: Source
+        Actions:
+        - InputArtifacts: []
+          Name: Source
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Version: 1
+            Provider: S3
+          OutputArtifacts:
+          - Name: SourceArtifacts
+          Configuration:
+            S3Bucket: !Ref SourceBucket
+            S3ObjectKey: !Ref SourceObjectKey
+            PollForSourceChanges: false
+          RunOrder: 1              
+
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: 1
+            Provider: CodeBuild
+          OutputArtifacts:
+          - Name: BuildArtifacts
+          InputArtifacts:
+          - Name: SourceArtifacts
+          Configuration:
+            ProjectName: !Ref CodeBuildProject
+          RunOrder: 1
+
+      - Name: CreateChangeSet
+        Actions:
+        - Name: Deploy
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: "1"
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            Capabilities: CAPABILITY_IAM
+            ChangeSetName: TVPDW-DEV-ExtUtilLambda-usw2-Changeset
+            RoleArn: !Ref LambdaArn
+            StackName: TVPDW-DEV-ExtUtilLambda-usw2
+            TemplatePath: "BuildArtifacts::output-template.yml"
+          InputArtifacts:
+          - Name: BuildArtifacts
+          RunOrder: 1
+      - Name: ExecuteChangeSet
+        Actions:
+        - Name: Deploy       
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: "1"
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: TVPDW-DEV-ExtUtilLambda-usw2-Changeset    
+            RoleArn: !Ref LambdaArn
+            StackName: TVPDW-DEV-ExtUtilLambda-usw2
+          RunOrder: 2            
+           
+      ArtifactStore:
+        Type: S3
+        Location: tvprecap-pipelineartifacts-usw2
+                
+  EventRule: 
+    Type: AWS::Events::Rule
+    Properties:
+      Name: TVPRecap-Dev-ExtUtil-rule-usw2 
+      Description: "EventRule"
+      EventPattern: 
+        source: 
+          - "aws.s3"
+        detail-type: 
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - "s3.amazonaws.com"
+          eventName:  
+            - "CopyObject"
+            - "PutObject"
+            - "CompleteMultipartUpload"
+          requestParameters:
+            bucketName:
+              - !Ref SourceBucket
+            key:
+              - !Ref SourceObjectKey
+      State: "ENABLED"
+
+      Targets:
+        -
+          Id: "TargetCodePipeline"
+          Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeLine}"
+          RoleArn: !Ref EventsRoleArn
+
